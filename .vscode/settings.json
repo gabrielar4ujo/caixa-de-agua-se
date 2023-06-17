@@ -22,7 +22,8 @@
     "tuple": "c",
     "type_traits": "c",
     "utility": "c",
-    "esp_err.h": "c"
+    "esp_err.h": "c",
+    "iterator": "c"
   },
   "idf.port": "/dev/ttyUSB0",
   "idf.flashType": "UART"

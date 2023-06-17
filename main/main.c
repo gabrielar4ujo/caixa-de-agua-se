@@ -8,18 +8,19 @@
 #include "esp_timer.h"
 #include "ssd1306.h"
 #include <string.h>
+#include "ultrasonic.h"
 
-#define TRIGGER_PIN GPIO_NUM_13 // pino trigger do sensor ultrassonico
-#define ECHO_PIN GPIO_NUM_35    // pino echo do sensor ultrassonico
-#define WATER_TANK_HEIGHT_CM 20 // altura maxima do reservatorio
-#define PIN_DS18B20 GPIO_NUM_32 // pino data do sensor de temp
+#define TRIGGER_PIN GPIO_NUM_13   // pino trigger do sensor ultrassonico
+#define ECHO_PIN GPIO_NUM_35      // pino echo do sensor ultrassonico
+#define WATER_TANK_HEIGHT_CM 13.5 // altura maxima do reservatorio
+#define PIN_DS18B20 GPIO_NUM_32   // pino data do sensor de temp
 #define DISTANCE_CONTROL GPIO_NUM_10
 #define TEMPERATURE_CONTROL GPIO_NUM_9
 #define DECREASE_BUTTON GPIO_NUM_14
 #define INCREMENT_BUTTON GPIO_NUM_26
 #define CHANGE_MODE_BUTTON GPIO_NUM_27
 #define DEBOUNCE_MS 200
-#define READ_SENSORS_DELAY 2000
+#define READ_SENSORS_DELAY 1500
 
 #define DS18B20_TAG "DS18B20"
 #define HCSR04_TAG "HCSR04"
@@ -33,7 +34,7 @@
 #define delay(value) vTaskDelay(value / portTICK_PERIOD_MS)
 
 volatile double temperatureLimit = 10;
-volatile int storageCapacityLimit = 10;
+volatile int storageCapacityLimit = 100;
 volatile double waterDistance = 0;
 volatile float waterTemperature = 0;
 
@@ -50,9 +51,20 @@ static SSD1306_t dev;
 
 volatile int currentMode = DISTANCE_MODE;
 
-double calculateWaterPercent()
+int calculateWaterPercent()
 {
-    return ((WATER_TANK_HEIGHT_CM - waterDistance) / WATER_TANK_HEIGHT_CM) * 100;
+    float waterDistanceAdjust = 0.0;
+    if (waterDistance < 3.5)
+    {
+        waterDistanceAdjust = 25.0;
+    }
+    int result = (((WATER_TANK_HEIGHT_CM - (waterDistance)) / WATER_TANK_HEIGHT_CM) * 100) + waterDistanceAdjust;
+
+    if (result > 100)
+        return 100;
+    if (result < 0)
+        return 0;
+    return result;
 }
 
 void write_text()
@@ -62,29 +74,29 @@ void write_text()
     char strTemperatureLimit[12];
     char strDistanceLimit[12];
 
-    float waterPercentage = calculateWaterPercent();
+    int waterPercentage = calculateWaterPercent();
 
     // Mostrar no display valores atuais de temperatura e capacidade
-    sprintf(strDistance, "%.2f", waterPercentage);
-    sprintf(strTemperature, "%.2f", waterTemperature);
+    sprintf(strDistance, "%d", waterPercentage);
+    sprintf(strTemperature, "%0.1f", waterTemperature);
     strcat(strDistance, " %");
-    strcat(strTemperature, " C");
+    strcat(strTemperature, " .C");
     ssd1306_display_text(&dev, 0, "Niveis atuais", 14, false);
     ssd1306_display_text(&dev, 1, strDistance, strlen(strDistance), false);
     ssd1306_display_text(&dev, 2, strTemperature, strlen(strTemperature), false);
 
     // Mostrar no display valores limites para acionamento dos atuadores
     sprintf(strDistanceLimit, "%d", storageCapacityLimit);
-    sprintf(strTemperatureLimit, "%.2f", temperatureLimit);
+    sprintf(strTemperatureLimit, "%0.1f", temperatureLimit);
     if (currentMode == DISTANCE_MODE)
     {
         strcat(strDistanceLimit, " % <-");
-        strcat(strTemperatureLimit, " C");
+        strcat(strTemperatureLimit, " .C");
     }
     else
     {
         strcat(strDistanceLimit, " %");
-        strcat(strTemperatureLimit, " C <-");
+        strcat(strTemperatureLimit, " .C <-");
     }
 
     ssd1306_display_text(&dev, 4, "Configuracoes", 14, false);
@@ -94,55 +106,66 @@ void write_text()
 
 void hcsr04_task(void *pvParameters)
 {
-    esp_rom_gpio_pad_select_gpio(TRIGGER_PIN);
-    esp_rom_gpio_pad_select_gpio(ECHO_PIN);
     esp_rom_gpio_pad_select_gpio(DISTANCE_CONTROL);
-    gpio_set_direction(TRIGGER_PIN, GPIO_MODE_OUTPUT);
-    gpio_set_direction(ECHO_PIN, GPIO_MODE_INPUT);
     gpio_set_direction(DISTANCE_CONTROL, GPIO_MODE_OUTPUT);
+
+    ultrasonic_sensor_t sensor = {
+        .trigger_pin = TRIGGER_PIN,
+        .echo_pin = ECHO_PIN,
+    };
+    ultrasonic_init(&sensor);
 
     while (1)
     {
-        // Pulso no pino de trigger
-        gpio_set_level(TRIGGER_PIN, 1);
-        delay(10);
-        gpio_set_level(TRIGGER_PIN, 0);
-
-        // Aguardar resposta no pino echo
-        int64_t pulse_start = 0;
-        int64_t pulse_end = 0;
-
-        while (gpio_get_level(ECHO_PIN) == 0)
+        float distance;
+        esp_err_t res = ultrasonic_measure(&sensor, WATER_TANK_HEIGHT_CM, &distance);
+        if (res != ESP_OK)
         {
-            pulse_start = esp_timer_get_time();
-        }
-        while (gpio_get_level(ECHO_PIN) == 1)
-        {
-            pulse_end = esp_timer_get_time();
-        }
-
-        // Calcular a duração do pulso em microssegundos
-        int64_t pulse_duration = pulse_end - pulse_start;
-
-        // Calcular a distância em centímetros
-        waterDistance = pulse_duration * 0.0343 / 2; // Fórmula para calcular a distância
-        float waterPercentage = calculateWaterPercent();
-
-        if (waterPercentage < storageCapacityLimit)
-        {
-            ESP_LOGW(HCSR04_TAG, "Bomba acionada!");
-            gpio_set_level(DISTANCE_CONTROL, 0);
+            ESP_LOGW(HCSR04_TAG, "Error %d: ", res);
+            switch (res)
+            {
+            case ESP_ERR_ULTRASONIC_PING:
+                ESP_LOGW(HCSR04_TAG, "Cannot ping (device is in invalid state)");
+                break;
+            case ESP_ERR_ULTRASONIC_PING_TIMEOUT:
+                ESP_LOGW(HCSR04_TAG, "Ping timeout (no device found)");
+                break;
+            case ESP_ERR_ULTRASONIC_ECHO_TIMEOUT:
+                ESP_LOGW(HCSR04_TAG, "Echo timeout (i.e. distance too big)");
+                break;
+            default:
+                ESP_LOGW(HCSR04_TAG, "%s", esp_err_to_name(res));
+            }
         }
         else
         {
-            gpio_set_level(DISTANCE_CONTROL, 1);
+            if (distance * 100 > WATER_TANK_HEIGHT_CM + 10)
+            {
+                ESP_LOGW(HCSR04_TAG, "Valor inválido: %f cm", distance * 100);
+                gpio_set_level(DISTANCE_CONTROL, 1);
+            }
+            else
+            {
+                waterDistance = distance * 100;
+                int waterPercentage = calculateWaterPercent();
+
+                if (waterPercentage < storageCapacityLimit)
+                {
+                    ESP_LOGW(HCSR04_TAG, "Bomba acionada!");
+                    gpio_set_level(DISTANCE_CONTROL, 0);
+                }
+                else
+                {
+                    gpio_set_level(DISTANCE_CONTROL, 1);
+                }
+
+                ssd1306_clear_line(&dev, 1, false);
+                write_text();
+
+                ESP_LOGW(HCSR04_TAG, "Distancia: %.1f cm", waterDistance);
+                ESP_LOGW(HCSR04_TAG, "Porcentagem de agua: %d %%\n", waterPercentage);
+            }
         }
-
-        ssd1306_clear_line(&dev, 1, false);
-        write_text();
-
-        ESP_LOGW(HCSR04_TAG, "Distancia: %.2f cm", waterDistance);
-        ESP_LOGW(HCSR04_TAG, "Porcentagem de agua: %.2f %%\n", waterPercentage);
         delay(READ_SENSORS_DELAY);
     }
 }
@@ -155,22 +178,29 @@ void temperature_task(void *pvParameters)
     while (1)
     {
         float current_temp = ds18b20_get_temp();
-        if (current_temp < temperatureLimit)
+        if (current_temp < -10 || current_temp > 50)
         {
-            ESP_LOGE(DS18B20_TAG, "Resistência acionada");
-            gpio_set_level(TEMPERATURE_CONTROL, 0);
+            ESP_LOGE(DS18B20_TAG, "Valor inválido: %0.1f", current_temp);
         }
         else
         {
-            gpio_set_level(TEMPERATURE_CONTROL, 1);
+            if (current_temp < temperatureLimit)
+            {
+                ESP_LOGE(DS18B20_TAG, "Resistência acionada");
+                gpio_set_level(TEMPERATURE_CONTROL, 1);
+            }
+            else
+            {
+                gpio_set_level(TEMPERATURE_CONTROL, 0);
+            }
+
+            ssd1306_clear_line(&dev, 2, false);
+            write_text();
+
+            ESP_LOGE(DS18B20_TAG, "Temperature: %0.1f C\n", current_temp);
+            waterTemperature = current_temp;
+            delay(READ_SENSORS_DELAY);
         }
-
-        ssd1306_clear_line(&dev, 2, false);
-        write_text();
-
-        ESP_LOGE(DS18B20_TAG, "Temperature: %0.2f C\n", current_temp);
-        waterTemperature = current_temp;
-        delay(READ_SENSORS_DELAY);
     }
 }
 
@@ -313,13 +343,12 @@ void change_mode_button_task(void *pvParams)
 
 void app_main()
 {
-    uint32_t usStackDepth = 1024;
     setup_display_text(&dev);
     setup_buttons();
 
-    xTaskCreatePinnedToCore(&hcsr04_task, "hcsr04_task", usStackDepth * 2, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(&temperature_task, "temperature_task", usStackDepth * 2, NULL, 5, NULL, 0);
-    xTaskCreatePinnedToCore(&decrease_button_task, "decrease_button_task", usStackDepth * 2, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(&increment_button_task, "increment_button_task", usStackDepth * 2, NULL, 1, NULL, 0);
-    xTaskCreatePinnedToCore(&change_mode_button_task, "change_mode_button_task", usStackDepth * 2, NULL, 1, NULL, 0);
+    xTaskCreate(hcsr04_task, "hcsr04_task", configMINIMAL_STACK_SIZE * 4, NULL, 3, NULL);
+    xTaskCreate(temperature_task, "temperature_task", configMINIMAL_STACK_SIZE * 4, NULL, 2, NULL);
+    xTaskCreate(decrease_button_task, "decrease_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
+    xTaskCreate(increment_button_task, "increment_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
+    xTaskCreate(change_mode_button_task, "change_mode_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
 }
