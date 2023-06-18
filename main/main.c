@@ -29,12 +29,14 @@
 #define CHANGE_MODE_BUTTON_TAG "CHANGE_MODE"
 
 #define TEMPERATURE_MODE 1
-#define DISTANCE_MODE 2
+#define MIN_DISTANCE_MODE 2
+#define MAX_DISTANCE_MODE 3
 
 #define delay(value) vTaskDelay(value / portTICK_PERIOD_MS)
 
 volatile double temperatureLimit = 10;
-volatile int storageCapacityLimit = 100;
+volatile int minStorageCapacityLimit = 10;
+volatile int maxStorageCapacityLimit = 100;
 volatile double waterDistance = 0;
 volatile float waterTemperature = 0;
 
@@ -49,7 +51,7 @@ volatile bool change_mode_button = false;
 
 static SSD1306_t dev;
 
-volatile int currentMode = DISTANCE_MODE;
+volatile int currentMode = MIN_DISTANCE_MODE;
 
 int calculateWaterPercent()
 {
@@ -67,41 +69,67 @@ int calculateWaterPercent()
     return result;
 }
 
-void write_text()
+void display_temperature()
 {
-    char strTemperature[12];
-    char strDistance[12];
-    char strTemperatureLimit[12];
-    char strDistanceLimit[12];
+    ssd1306_display_text(&dev, 0, "Niveis atuais", 14, false);
 
+    char strTemperature[12];
+
+    ssd1306_clear_line(&dev, 2, false);
+    sprintf(strTemperature, "%0.1f", waterTemperature);
+    strcat(strTemperature, " .C");
+    ssd1306_display_text(&dev, 2, strTemperature, strlen(strTemperature), false);
+}
+
+void display_water_percentage()
+{
+    ssd1306_display_text(&dev, 0, "Niveis atuais", 14, false);
+    char strDistance[12];
     int waterPercentage = calculateWaterPercent();
 
-    // Mostrar no display valores atuais de temperatura e capacidade
+    ssd1306_clear_line(&dev, 1, false);
     sprintf(strDistance, "%d", waterPercentage);
-    sprintf(strTemperature, "%0.1f", waterTemperature);
-    strcat(strDistance, " %");
-    strcat(strTemperature, " .C");
-    ssd1306_display_text(&dev, 0, "Niveis atuais", 14, false);
+    strcat(strDistance, "%");
     ssd1306_display_text(&dev, 1, strDistance, strlen(strDistance), false);
-    ssd1306_display_text(&dev, 2, strTemperature, strlen(strTemperature), false);
+}
 
-    // Mostrar no display valores limites para acionamento dos atuadores
-    sprintf(strDistanceLimit, "%d", storageCapacityLimit);
-    sprintf(strTemperatureLimit, "%0.1f", temperatureLimit);
-    if (currentMode == DISTANCE_MODE)
+void display_control()
+{
+    ssd1306_display_text(&dev, 4, "Configuracoes", 14, false);
+    char minStrDistanceLimit[12];
+    char maxStrDistanceLimit[12];
+    char strTemperatureLimit[12];
+
+    ssd1306_clear_line(&dev, 5, false);
+    ssd1306_clear_line(&dev, 6, false);
+    ssd1306_clear_line(&dev, 7, false);
+
+    sprintf(minStrDistanceLimit, "%d", minStorageCapacityLimit);
+    sprintf(maxStrDistanceLimit, "%d", maxStorageCapacityLimit);
+    sprintf(strTemperatureLimit, "%.0f", temperatureLimit);
+
+    if (currentMode == MIN_DISTANCE_MODE)
     {
-        strcat(strDistanceLimit, " % <-");
+        strcat(minStrDistanceLimit, "% Min <-");
+        strcat(maxStrDistanceLimit, "% Max");
         strcat(strTemperatureLimit, " .C");
     }
-    else
+    else if (currentMode == MAX_DISTANCE_MODE)
     {
-        strcat(strDistanceLimit, " %");
+        strcat(minStrDistanceLimit, "% Min");
+        strcat(maxStrDistanceLimit, "% Max <-");
+        strcat(strTemperatureLimit, " .C");
+    }
+    else if (currentMode == TEMPERATURE_MODE)
+    {
         strcat(strTemperatureLimit, " .C <-");
+        strcat(minStrDistanceLimit, "% Min");
+        strcat(maxStrDistanceLimit, "% Max");
     }
 
-    ssd1306_display_text(&dev, 4, "Configuracoes", 14, false);
-    ssd1306_display_text(&dev, 5, strDistanceLimit, strlen(strDistanceLimit), false);
-    ssd1306_display_text(&dev, 6, strTemperatureLimit, strlen(strTemperatureLimit), false);
+    ssd1306_display_text(&dev, 5, minStrDistanceLimit, strlen(minStrDistanceLimit), false);
+    ssd1306_display_text(&dev, 6, maxStrDistanceLimit, strlen(maxStrDistanceLimit), false);
+    ssd1306_display_text(&dev, 7, strTemperatureLimit, strlen(strTemperatureLimit), false);
 }
 
 void hcsr04_task(void *pvParameters)
@@ -139,34 +167,63 @@ void hcsr04_task(void *pvParameters)
         }
         else
         {
-            if (distance * 100 > WATER_TANK_HEIGHT_CM + 10)
-            {
-                ESP_LOGW(HCSR04_TAG, "Valor inválido: %f cm", distance * 100);
-                gpio_set_level(DISTANCE_CONTROL, 1);
-            }
-            else
-            {
-                waterDistance = distance * 100;
-                int waterPercentage = calculateWaterPercent();
 
-                if (waterPercentage < storageCapacityLimit)
-                {
-                    ESP_LOGW(HCSR04_TAG, "Bomba acionada!");
-                    gpio_set_level(DISTANCE_CONTROL, 0);
-                }
-                else
-                {
-                    gpio_set_level(DISTANCE_CONTROL, 1);
-                }
+            waterDistance = distance * 100;
+            display_water_percentage();
 
-                ssd1306_clear_line(&dev, 1, false);
-                write_text();
-
-                ESP_LOGW(HCSR04_TAG, "Distancia: %.1f cm", waterDistance);
-                ESP_LOGW(HCSR04_TAG, "Porcentagem de agua: %d %%\n", waterPercentage);
-            }
+            int waterPercentage = calculateWaterPercent();
+            ESP_LOGW(HCSR04_TAG, "Distancia: %.1f cm", waterDistance);
+            ESP_LOGW(HCSR04_TAG, "Porcentagem de agua: %d %%\n", waterPercentage);
         }
         delay(READ_SENSORS_DELAY);
+    }
+}
+
+void turn_on_resistance_task(void *ignore)
+{
+    while (1)
+    {
+        delay(2000);
+        int waterPercentage = calculateWaterPercent();
+        if (waterTemperature < temperatureLimit && waterPercentage >= 10)
+        {
+            ESP_LOGE(DS18B20_TAG, "Resistência acionada");
+            gpio_set_level(TEMPERATURE_CONTROL, 1);
+        }
+        else
+        {
+            gpio_set_level(TEMPERATURE_CONTROL, 0);
+        }
+    }
+}
+
+void turn_on_water_pump_task(void *ignore)
+{
+    int turn_on = 1;
+    while (1)
+    {
+        delay(1000);
+        int waterPercentage = calculateWaterPercent();
+
+        if (waterDistance > WATER_TANK_HEIGHT_CM + 10)
+        {
+            ESP_LOGW(HCSR04_TAG, "Valor inválido: %f cm", waterDistance);
+            gpio_set_level(DISTANCE_CONTROL, 1);
+        }
+        else
+        {
+            if (waterPercentage < minStorageCapacityLimit)
+            {
+                ESP_LOGW(HCSR04_TAG, "Bomba acionada!");
+                turn_on = 0;
+            }
+            else if (!turn_on && waterPercentage >= maxStorageCapacityLimit)
+            {
+                ESP_LOGW(HCSR04_TAG, "Bomba desligada!");
+                turn_on = 1;
+            }
+            gpio_set_level(DISTANCE_CONTROL, turn_on);
+        }
     }
 }
 
@@ -184,19 +241,7 @@ void temperature_task(void *pvParameters)
         }
         else
         {
-            if (current_temp < temperatureLimit)
-            {
-                ESP_LOGE(DS18B20_TAG, "Resistência acionada");
-                gpio_set_level(TEMPERATURE_CONTROL, 1);
-            }
-            else
-            {
-                gpio_set_level(TEMPERATURE_CONTROL, 0);
-            }
-
-            ssd1306_clear_line(&dev, 2, false);
-            write_text();
-
+            display_temperature();
             ESP_LOGE(DS18B20_TAG, "Temperature: %0.1f C\n", current_temp);
             waterTemperature = current_temp;
             delay(READ_SENSORS_DELAY);
@@ -269,18 +314,23 @@ void decrease_button_task(void *pvParams)
                 if (temperatureLimit > 10)
                 {
                     temperatureLimit--;
-                    ssd1306_clear_line(&dev, 6, false);
+                }
+            }
+            else if (currentMode == MIN_DISTANCE_MODE)
+            {
+                if (minStorageCapacityLimit > 10)
+                {
+                    minStorageCapacityLimit -= 5;
                 }
             }
             else
             {
-                if (storageCapacityLimit > 10)
+                if (maxStorageCapacityLimit > minStorageCapacityLimit)
                 {
-                    storageCapacityLimit -= 5;
-                    ssd1306_clear_line(&dev, 5, false);
+                    maxStorageCapacityLimit -= 5;
                 }
             }
-            write_text();
+            display_control();
             ESP_LOGI(DECREASE_BUTTON_TAG, "Diminuir valor\n");
         }
         delay(50);
@@ -299,18 +349,23 @@ void increment_button_task(void *pvParams)
                 if (temperatureLimit < 50)
                 {
                     temperatureLimit++;
-                    ssd1306_clear_line(&dev, 6, false);
+                }
+            }
+            else if (currentMode == MIN_DISTANCE_MODE)
+            {
+                if (minStorageCapacityLimit < maxStorageCapacityLimit)
+                {
+                    minStorageCapacityLimit += 5;
                 }
             }
             else
             {
-                if (storageCapacityLimit < 100)
+                if (maxStorageCapacityLimit < 100)
                 {
-                    storageCapacityLimit += 5;
-                    ssd1306_clear_line(&dev, 5, false);
+                    maxStorageCapacityLimit += 5;
                 }
             }
-            write_text();
+            display_control();
             ESP_LOGI(INCREMENT_BUTTON_TAG, "Aumentar valor\n");
         }
         delay(50);
@@ -325,15 +380,18 @@ void change_mode_button_task(void *pvParams)
         {
             if (currentMode == TEMPERATURE_MODE)
             {
-                currentMode = DISTANCE_MODE;
+                currentMode = MIN_DISTANCE_MODE;
+            }
+            else if (currentMode == MIN_DISTANCE_MODE)
+            {
+                currentMode = MAX_DISTANCE_MODE;
             }
             else
             {
                 currentMode = TEMPERATURE_MODE;
             }
-            ssd1306_clear_line(&dev, 5, false);
-            ssd1306_clear_line(&dev, 6, false);
-            write_text();
+
+            display_control();
             change_mode_button = false;
             ESP_LOGI(CHANGE_MODE_BUTTON_TAG, "Mudar modo: %d\n", currentMode);
         }
@@ -343,11 +401,16 @@ void change_mode_button_task(void *pvParams)
 
 void app_main()
 {
-    setup_display_text(&dev);
     setup_buttons();
+    setup_display_text(&dev);
+    display_control();
 
     xTaskCreate(hcsr04_task, "hcsr04_task", configMINIMAL_STACK_SIZE * 4, NULL, 3, NULL);
-    xTaskCreate(temperature_task, "temperature_task", configMINIMAL_STACK_SIZE * 4, NULL, 2, NULL);
+    xTaskCreate(turn_on_water_pump_task, "turn_on_water_pump_task", configMINIMAL_STACK_SIZE * 3, NULL, 3, NULL);
+
+    xTaskCreate(temperature_task, "temperature_task", configMINIMAL_STACK_SIZE * 4, NULL, 3, NULL);
+    xTaskCreate(turn_on_resistance_task, "turn_on_resistance_task", configMINIMAL_STACK_SIZE * 3, NULL, 3, NULL);
+
     xTaskCreate(decrease_button_task, "decrease_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
     xTaskCreate(increment_button_task, "increment_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
     xTaskCreate(change_mode_button_task, "change_mode_button_task", configMINIMAL_STACK_SIZE * 3, NULL, 1, NULL);
