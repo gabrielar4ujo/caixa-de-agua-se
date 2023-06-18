@@ -29,14 +29,12 @@
 #define CHANGE_MODE_BUTTON_TAG "CHANGE_MODE"
 
 #define TEMPERATURE_MODE 1
-#define MIN_DISTANCE_MODE 2
-#define MAX_DISTANCE_MODE 3
+#define DISTANCE_MODE 2
 
 #define delay(value) vTaskDelay(value / portTICK_PERIOD_MS)
 
 volatile double temperatureLimit = 10;
-volatile int minStorageCapacityLimit = 10;
-volatile int maxStorageCapacityLimit = 100;
+volatile int storageCapacityLimit = 10;
 volatile double waterDistance = 0;
 volatile float waterTemperature = 0;
 
@@ -51,7 +49,7 @@ volatile bool change_mode_button = false;
 
 static SSD1306_t dev;
 
-volatile int currentMode = MIN_DISTANCE_MODE;
+volatile int currentMode = DISTANCE_MODE;
 
 int calculateWaterPercent()
 {
@@ -97,39 +95,27 @@ void display_control()
 {
     ssd1306_display_text(&dev, 4, "Configuracoes", 14, false);
     char minStrDistanceLimit[12];
-    char maxStrDistanceLimit[12];
     char strTemperatureLimit[12];
 
     ssd1306_clear_line(&dev, 5, false);
     ssd1306_clear_line(&dev, 6, false);
-    ssd1306_clear_line(&dev, 7, false);
 
-    sprintf(minStrDistanceLimit, "%d", minStorageCapacityLimit);
-    sprintf(maxStrDistanceLimit, "%d", maxStorageCapacityLimit);
+    sprintf(minStrDistanceLimit, "%d", storageCapacityLimit);
     sprintf(strTemperatureLimit, "%.0f", temperatureLimit);
 
-    if (currentMode == MIN_DISTANCE_MODE)
+    if (currentMode == DISTANCE_MODE)
     {
-        strcat(minStrDistanceLimit, "% Min <-");
-        strcat(maxStrDistanceLimit, "% Max");
-        strcat(strTemperatureLimit, " .C");
-    }
-    else if (currentMode == MAX_DISTANCE_MODE)
-    {
-        strcat(minStrDistanceLimit, "% Min");
-        strcat(maxStrDistanceLimit, "% Max <-");
+        strcat(minStrDistanceLimit, "% <-");
         strcat(strTemperatureLimit, " .C");
     }
     else if (currentMode == TEMPERATURE_MODE)
     {
         strcat(strTemperatureLimit, " .C <-");
-        strcat(minStrDistanceLimit, "% Min");
-        strcat(maxStrDistanceLimit, "% Max");
+        strcat(minStrDistanceLimit, "%");
     }
 
     ssd1306_display_text(&dev, 5, minStrDistanceLimit, strlen(minStrDistanceLimit), false);
-    ssd1306_display_text(&dev, 6, maxStrDistanceLimit, strlen(maxStrDistanceLimit), false);
-    ssd1306_display_text(&dev, 7, strTemperatureLimit, strlen(strTemperatureLimit), false);
+    ssd1306_display_text(&dev, 6, strTemperatureLimit, strlen(strTemperatureLimit), false);
 }
 
 void hcsr04_task(void *pvParameters)
@@ -212,12 +198,12 @@ void turn_on_water_pump_task(void *ignore)
         }
         else
         {
-            if (waterPercentage < minStorageCapacityLimit)
+            if (waterPercentage < 10)
             {
                 ESP_LOGW(HCSR04_TAG, "Bomba acionada!");
                 turn_on = 0;
             }
-            else if (!turn_on && waterPercentage >= maxStorageCapacityLimit)
+            else if (!turn_on && waterPercentage >= storageCapacityLimit)
             {
                 ESP_LOGW(HCSR04_TAG, "Bomba desligada!");
                 turn_on = 1;
@@ -316,20 +302,14 @@ void decrease_button_task(void *pvParams)
                     temperatureLimit--;
                 }
             }
-            else if (currentMode == MIN_DISTANCE_MODE)
+            else if (currentMode == DISTANCE_MODE)
             {
-                if (minStorageCapacityLimit > 10)
+                if (storageCapacityLimit > 10)
                 {
-                    minStorageCapacityLimit -= 5;
+                    storageCapacityLimit -= 5;
                 }
             }
-            else
-            {
-                if (maxStorageCapacityLimit > minStorageCapacityLimit)
-                {
-                    maxStorageCapacityLimit -= 5;
-                }
-            }
+
             display_control();
             ESP_LOGI(DECREASE_BUTTON_TAG, "Diminuir valor\n");
         }
@@ -351,18 +331,11 @@ void increment_button_task(void *pvParams)
                     temperatureLimit++;
                 }
             }
-            else if (currentMode == MIN_DISTANCE_MODE)
+            else if (currentMode == DISTANCE_MODE)
             {
-                if (minStorageCapacityLimit < maxStorageCapacityLimit)
+                if (storageCapacityLimit < 100)
                 {
-                    minStorageCapacityLimit += 5;
-                }
-            }
-            else
-            {
-                if (maxStorageCapacityLimit < 100)
-                {
-                    maxStorageCapacityLimit += 5;
+                    storageCapacityLimit += 5;
                 }
             }
             display_control();
@@ -380,13 +353,9 @@ void change_mode_button_task(void *pvParams)
         {
             if (currentMode == TEMPERATURE_MODE)
             {
-                currentMode = MIN_DISTANCE_MODE;
+                currentMode = DISTANCE_MODE;
             }
-            else if (currentMode == MIN_DISTANCE_MODE)
-            {
-                currentMode = MAX_DISTANCE_MODE;
-            }
-            else
+            else if (currentMode == DISTANCE_MODE)
             {
                 currentMode = TEMPERATURE_MODE;
             }
